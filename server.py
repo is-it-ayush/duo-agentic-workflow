@@ -3,6 +3,7 @@
 import hashlib, json, os, pathlib, re, shlex, shutil, subprocess, time
 import ollama
 from mcp.server.fastmcp import FastMCP
+from typing import Any
 
 HOME = pathlib.Path(__file__).resolve().parent
 ROOT = pathlib.Path(os.environ.get("AGENT_PROJECT", os.getcwd())).resolve()
@@ -42,9 +43,15 @@ NEXT = {
 }
 RUNNING = False
 
+# ---------- helpers ----------
+def trace(line):
+    AG.mkdir(exist_ok=True)
+    with open(AG / "run.log", "a") as f:
+        f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+
 
 # ---------- state ----------
-def load():
+def load() -> dict[str, Any]:
     return json.loads(STATE.read_text()) if STATE.exists() else {"phase": "NONE"}
 
 def save(s):
@@ -212,6 +219,7 @@ def run_step(s, n, step):
             else:
                 try: result = str(tools[name](**args))
                 except Exception as e: result = f"error: {e}"
+            trace(f"step {n} {name} {str(args)[:120]} -> {result[:80]!r}")
             msgs.append({"role": "tool", "tool_name": name, "content": result})
 
 def write_checkpoint(n, msgs):
@@ -264,10 +272,15 @@ def fsm_to(phase: str, pointer: int = 0, mode: str = "") -> str:
     """Director transitions: PLAN, DRAFT, BUFFER, DONE. IMPLEMENT is entered via run_implementor.
     BUFFER from VALIDATE requires pointer=<step> and mode='direct'."""
     s = load(); recover(s); frm = s["phase"]
+    # guard against illegal transitions
     if EDGES.get((frm, phase)) != "director" or phase == "IMPLEMENT":
         return f"refused: {frm}->{phase}"
+    # guard against invalid mode values; empty string means "keep current"
     if mode and mode not in ("progressive", "direct"):
         return "refused: mode must be progressive|direct"
+    # guard against accidental plan creation in ~ or outside a git repo
+    if phase == "PLAN" and frm == "NONE" and (ROOT == pathlib.Path.home() or not (ROOT / ".git").exists()):
+        return "refused: run inside a git repo (not ~)"
     if phase == "PLAN":
         if frm != "NONE": archive_plan()
         PLAN.mkdir(parents=True, exist_ok=True)
