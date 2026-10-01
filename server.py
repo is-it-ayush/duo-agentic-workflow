@@ -17,7 +17,7 @@ MAX_ATTEMPTS = 4        # escalate when failed verifications exceed this
 MAX_ESCALATIONS = 2     # director fixes per step before the user must be consulted
 MAX_TOOL_CALLS = 40     # per attempt
 STEP_CHAR_CAP = 1800
-ALLOW = {"pytest", "python", "ruff", "make", "cargo", "npm", "go", "ls", "cat", "grep"}  # hygiene, not a sandbox
+ALLOW = {"pytest", "python", "python3", "ruff", "make", "cargo", "npm", "go", "ls", "cat", "grep"}  # hygiene, not a sandbox
 
 EDGES = {  # (from, to) -> actor
     ("NONE", "PLAN"): "director",
