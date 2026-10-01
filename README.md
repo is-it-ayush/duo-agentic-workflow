@@ -1,8 +1,13 @@
 # agent: director/implementor agentic workflow
 
-A system-wide, git-tracked workflow where **Claude Code is the director** (thinks, plans, reviews) and a **local Ollama model (`qwen3.5:9b`) is the implementor** (executes one small step at a time, exactly as written, no design of its own).
+A system-wide, git-tracked workflow where **Claude Code is the director**
+(thinks, plans, reviews) and a **local Ollama model (`qwen3.5:9b`) is the
+implementor** (executes one small step at a time, exactly as written,
+no design of its own).
 
-Goals: minimise director tokens, be precise about what each agent is told, and behave as a strict finite state machine. Transitions are enforced in code (`server.py`), not by prompts.
+Goals: minimise director tokens, be precise about what each agent is
+told, and behave as a strict finite state machine. Transitions are enforced
+in code (`server.py`), not by prompts.
 
 ## Contents
 
@@ -137,8 +142,11 @@ exit 0
 Notes:
 
 - Only `Edit(...)` deny rules are matched. A `Write(...)` rule is rejected with a warning.
-- `MCP_TOOL_TIMEOUT` is in milliseconds. It must be long, because `run_implementor()` blocks while Qwen works. Check the name and unit against current Claude Code docs.
-- Ollama: the first step pays a cold model load. To keep the model resident, preload with `curl -s localhost:11434/api/generate -d '{"model":"qwen3.5:9b","keep_alive":"30m"}'`. The server also passes `keep_alive="30m"`.
+- `MCP_TOOL_TIMEOUT` is in milliseconds. It must be long, because `run_implementor()` blocks while
+Qwen works. Check the name and unit against current Claude Code docs.
+- Ollama: the first step pays a cold model load. To keep the model resident, preload with
+`curl -s localhost:11434/api/generate -d '{"model":"qwen3.5:9b","keep_alive":"30m"}'`. The server
+also passes `keep_alive="30m"`.
 
 Verify the install:
 
@@ -163,17 +171,24 @@ printf '.agent/state.json\n.agent/attempts/\n.agent/checkpoint.md\n.agent/run.lo
 git add -A && git commit -m init          # clean baseline so diffs are readable
 ```
 
-`AGENTS.md` is read by the implementor and by the subagents. Claude Code itself reads `CLAUDE.md`, not `AGENTS.md`. Add a `CLAUDE.md` containing `@AGENTS.md` only if you want ordinary Claude sessions in that repo to see the same facts. Use `python3` in test commands (Debian has no `python`).
+`AGENTS.md` is read by the implementor and by the subagents. Claude Code itself
+reads `CLAUDE.md`, not `AGENTS.md`. Add a `CLAUDE.md` containing `@AGENTS.md`
+only if you want ordinary Claude sessions in that repo to see the same facts.
+Use `python3` in test commands (Debian has no `python`).
 
-`.agent/` is relative to the directory you launch `claude` from. The server uses the same rule (`$AGENT_PROJECT` overrides it).
+`.agent/` is relative to the directory you launch `claude` from. The server uses
+the same rule (`$AGENT_PROJECT` overrides it).
 
 ### Each session
 
 1. Make sure Ollama is running.
-2. Run `claude` in the project directory. `/mcp` should show `agent`, and `/agents` the three subagents.
-3. `/agent <goal>`. The director asks one question per message until nothing is ambiguous, then writes `.agent/plan/summary.md`.
+2. Run `claude` in the project directory. `/mcp` should show `agent`, and
+`/agents` the three subagents.
+3. `/agent <goal>`. The director asks one question per message until nothing is
+ambiguous, then writes `.agent/plan/summary.md`.
 4. Reply `APPROVE` (or list changes).
-5. It then runs by itself: draft the plan, hand off to Qwen, validate. You hear back at the end, or if an escalation hits the limit and needs your guidance.
+5. It then runs by itself: draft the plan, hand off to Qwen, validate. You hear
+back at the end, or if an escalation hits the limit and needs your guidance.
 
 Watch it from another terminal:
 
@@ -185,20 +200,39 @@ git diff --stat
 
 ### Stop, resume, reset
 
-- **Pause:** exit `claude`. Starting it again in that directory resumes at the recorded phase (the hook points Claude at `fsm_status`).
-- **Hard stop mid-implementation:** exit `claude` or `pkill -f personal/agent/server.py`. The next `fsm_status` moves a stale `IMPLEMENT` back to `BUFFER`; then re-run. After a kill you may need `/mcp` to reconnect.
-- **New goal:** `/agent <goal>` once the phase is `DONE`. The old plan is archived under `.agent/archive/`.
+- **Pause:** exit `claude`. Starting it again in that directory resumes at the
+recorded phase (the hook points Claude at `fsm_status`).
+- **Hard stop mid-implementation:** exit `claude` or `pkill -f personal/agent/server.py`.
+The next `fsm_status` moves a stale `IMPLEMENT` back to `BUFFER`; then re-run.
+After a kill you may need `/mcp` to reconnect.
+- **New goal:** `/agent <goal>` once the phase is `DONE`. The old plan is
+archived under `.agent/archive/`.
 - **Abandon:** `rm -rf .agent` and `git reset --hard` to your baseline commit.
 
 ## Phases
 
-1. **PLAN** (director + you). Rules in `common/discussion.md`: one question per message, options with a recommendation, assumptions stated, nothing coded. Output: `summary.md` (goal, decisions with short reasons, ordered milestones, how each is tested, out of scope, no open items). Only an explicit `APPROVE` moves on. The server cannot verify your consent; that rule lives in the prompts.
-2. **DRAFT** (`drafter` subagent, fresh context). Turns the summary into small, ordered step files. The drafter also writes the test files into the project and lists them in `LOCK`, so Qwen cannot weaken them.
-3. **BUFFER.** Pure handoff: the director calls `run_implementor()`. The plan is hash-locked and cannot change here. After an escalation, the `unblocker` subagent writes `.agent/directive.md`, which is injected into Qwen's next attempt at that step.
-4. **IMPLEMENT** (Qwen). Per step, in a fresh context: read, edit, `finish_step`. The server runs the step's TEST commands. Pass means advance. A failed attempt feeds the output back to Qwen. More than 4 failed attempts (or `blocked()`) writes a checkpoint and returns to BUFFER.
+1. **PLAN** (director + you). Rules in `common/discussion.md`: one question per
+message, options with a recommendation, assumptions stated, nothing coded.
+Output: `summary.md` (goal, decisions with short reasons, ordered milestones,
+how each is tested, out of scope, no open items). Only an explicit `APPROVE`
+moves on. The server cannot verify your consent; that rule lives in the prompts.
+2. **DRAFT** (`drafter` subagent, fresh context). Turns the summary into
+small, ordered step files. The drafter also writes the test files into the
+project and lists them in `LOCK`, so Qwen cannot weaken them.
+3. **BUFFER.** Pure handoff: the director calls `run_implementor()`. The
+plan is hash-locked and cannot change here. After an escalation, the `unblocker`
+subagent writes `.agent/directive.md`, which is injected into Qwen's next
+attempt at that step.
+4. **IMPLEMENT** (Qwen). Per step, in a fresh context: read, edit, `finish_step`.
+The server runs the step's TEST commands. Pass means advance. A failed attempt
+feeds the output back to Qwen. More than 4 failed attempts (or `blocked()`)
+writes a checkpoint and returns to BUFFER.
    - A text-only reply from Qwen counts as an implicit `finish_step`.
    - Progressive mode runs all remaining steps. Direct mode runs only `pointer`, then goes to VALIDATE.
-5. **VALIDATE** (`validator` subagent, fresh context). Runs every TEST plus the project's full test command and checks the code against the plan. `PASS` goes to DONE with a final summary. `FAIL step=n` writes a directive for that step and returns to BUFFER in direct mode.
+5. **VALIDATE** (`validator` subagent, fresh context). Runs every TEST plus the
+project's full test command and checks the code against the plan. `PASS` goes
+to DONE with a final summary. `FAIL step=n` writes a directive for that step
+and returns to BUFFER in direct mode.
 
 After 2 director fixes on the same step the server halts. The director must consult you, then call `run_implementor(user_guided=true)`.
 
@@ -329,3 +363,9 @@ The prompts steer the agent that would be editing them, so treat changes as code
 - The server cannot verify that you approved a plan.
 - A blocking MCP call can't be interrupted cleanly from Claude. Hard stop is by killing the process.
 - Test commands run without a shell, so no pipes, redirects or `&&`.
+
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE.md) file
+for details.
