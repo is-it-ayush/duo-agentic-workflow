@@ -193,17 +193,26 @@ def run_step(s, n, step):
     if DIRECTIVE.exists():
         task += "\n\nDIRECTIVE:\n" + DIRECTIVE.read_text()[:2000]
     msgs = [{"role": "system", "content": system_prompt()}, {"role": "user", "content": task}]
-    calls = 0
+    calls, last = 0, ""
     while True:
         if calls >= MAX_TOOL_CALLS:
             s["attempts"] += 1; save(s); calls = 0
-            log_fail(n, s["attempts"], "tool-call budget exhausted")
+            log_fail(n, s["attempts"], f"tool-call budget exhausted; last reply: {last[:200]!r}")
             if s["attempts"] > MAX_ATTEMPTS: return "escalate", msgs
             msgs.append({"role": "user", "content": "Budget exhausted. Call finish_step now."})
         resp = chat(msgs, list(tools.values()))
         msgs.append(resp.message); calls += 1
-        if not resp.message.tool_calls:
-            msgs.append({"role": "user", "content": "Use tools, or call finish_step."}); continue
+        last = resp.message.content or ""
+        if not resp.message.tool_calls:      # model stopped calling tools: treat as finish_step
+            trace(f"step {n} text-only reply, verifying: {last[:200]!r}")
+            ok, out = verify(step, locks0)
+            if ok: return "pass", msgs
+            s["attempts"] += 1; save(s); calls = 0
+            log_fail(n, s["attempts"], out)
+            if s["attempts"] > MAX_ATTEMPTS: return "escalate", msgs
+            msgs.append({"role": "user", "content":
+                         f"FAIL attempt {s['attempts']}/{MAX_ATTEMPTS}\n{out}\nFix it with tools, then call finish_step."})
+            continue
         for tc in resp.message.tool_calls:
             name, args = tc.function.name, tc.function.arguments
             if name == "blocked":
@@ -284,9 +293,8 @@ def fsm_to(phase: str, pointer: int = 0, mode: str = "") -> str:
     if phase == "PLAN":
         if frm != "NONE": archive_plan()
         PLAN.mkdir(parents=True, exist_ok=True)
-        s = {"phase": "NONE"}   # fresh state; edge already validated above
         move(s, "director", "PLAN", mode="progressive", pointer=1, total=0, attempts=0,
-             escalations=0, needs_directive=False, halted=False)
+            escalations=0, needs_directive=False, halted=False, plan_hash=None)
     elif phase == "DRAFT":
         f = PLAN / "summary.md"
         if not f.exists() or not f.read_text().strip(): return "refused: plan/summary.md missing"
