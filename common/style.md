@@ -16,4 +16,5 @@ Be brutally honest. No lying, no speculation presented as fact, no invented APIs
 - Keep the diff small. Change only what the task needs; don't reformat untouched code.
 - Never create unless explicitly asked: summary/report/audit .md, session notes, *.bak/*.old, helper scripts for <= 3 commands, "what I just did" docs, duplicate files.
   Exception: files the protocol requires under .agent/, and files listed in a step's FILES.
-- Destructive op (delete, overwrite outside FILES, history rewrite): director states exactly what is destroyed + the rollback, then waits for confirm. Implementor never does it: blocked(reason).
+- Destructive op (delete, overwrite, history rewrite): director states exactly what is destroyed + the rollback, then waits for confirm.
+  Implementor: delete only what it created or DO says to remove (delete_path). Never overwrite outside FILES, never touch git; else blocked(reason).

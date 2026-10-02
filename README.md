@@ -1,7 +1,7 @@
 # agent: director/implementor agentic workflow
 
 A system-wide, git-tracked workflow where **Claude Code is the director**
-(thinks, plans, reviews) and a **local Ollama model (`qwen3.5:9b`) is the
+(thinks, plans, reviews) and a **local Ollama model (`qwen3:8b`) is the
 implementor** (executes one small step at a time, exactly as written,
 no design of its own).
 
@@ -95,7 +95,7 @@ What each agent loads:
 
 ## Install
 
-Prerequisites: Debian-like Linux, Python 3.13, git, Claude Code (CLI), Ollama running with `qwen3.5:9b` pulled and tool support.
+Prerequisites: Debian-like Linux, Python 3.13, git, Claude Code (CLI), Ollama running with `qwen3:8b` pulled and tool support.
 
 ```bash
 cd ~/personal/agent
@@ -145,7 +145,7 @@ Notes:
 - `MCP_TOOL_TIMEOUT` is in milliseconds. It must be long, because `run_implementor()` blocks while
 Qwen works. Check the name and unit against current Claude Code docs.
 - Ollama: the first step pays a cold model load. To keep the model resident, preload with
-`curl -s localhost:11434/api/generate -d '{"model":"qwen3.5:9b","keep_alive":"30m"}'`. The server
+`curl -s localhost:11434/api/generate -d '{"model":"qwen3:8b","keep_alive":"30m"}'`. The server
 also passes `keep_alive="30m"`.
 
 Verify the install:
@@ -298,7 +298,7 @@ Constants at the top of `server.py`:
 
 | Name | Default | Meaning |
 |---|---|---|
-| `MODEL` | `qwen3.5:9b` | override with `AGENT_MODEL` |
+| `MODEL` | `qwen3:8b` | override with `AGENT_MODEL` |
 | `NUM_CTX` | 32768 | check `ollama ps` shows 100% GPU; lower it if it spills to CPU |
 | `MAX_ATTEMPTS` | 4 | escalate when failed verifications exceed this (the 5th failure) |
 | `MAX_ESCALATIONS` | 2 | director fixes per step before the user must be consulted |
@@ -358,7 +358,7 @@ The prompts steer the agent that would be editing them, so treat changes as code
 
 ## Known limitations
 
-- `qwen3.5:9b` quality bounds what a step can ask for. Keep steps small and single-goal.
+- `qwen3:8b` quality bounds what a step can ask for. Keep steps small and single-goal.
 - Qwen's own checkpoint summary can be wrong. Treat the mechanical log in `checkpoint.md` as the evidence.
 - The server cannot verify that you approved a plan.
 - A blocking MCP call can't be interrupted cleanly from Claude. Hard stop is by killing the process.

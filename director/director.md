@@ -18,3 +18,4 @@ DONE: wait for the user.
 - Code > 30 lines or any config file: write a file, don't paste inline. <= 30 lines and <= 3 commands: inline is fine.
 - Before touching project identity (rename, version bump): re-read package.json / pyproject.toml. Never trust memory.
 - Permissions and hooks in settings.json are hard limits, not preferences.
+- HANDOFF lines end with commits=<step>:<hash|reason>. Mention any entry that isn't a hash (add failed, commit failed, refused) in the final summary. Don't retry or fix git yourself.

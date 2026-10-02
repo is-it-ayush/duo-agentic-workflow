@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Director/implementor FSM + implementor runtime. Project = $AGENT_PROJECT or cwd."""
 import hashlib, json, os, pathlib, re, shlex, shutil, subprocess, time
+from typing import Any
 import ollama
 from mcp.server.fastmcp import FastMCP
-from typing import Any
 
 HOME = pathlib.Path(__file__).resolve().parent
 ROOT = pathlib.Path(os.environ.get("AGENT_PROJECT", os.getcwd())).resolve()
@@ -11,13 +11,16 @@ AG = ROOT / ".agent"
 STATE, PLAN = AG / "state.json", AG / "plan"
 DIRECTIVE, CHECKPOINT, ATTEMPTS = AG / "directive.md", AG / "checkpoint.md", AG / "attempts"
 
-MODEL = os.environ.get("AGENT_MODEL", "qwen3.5:9b")   # match `ollama list`
+MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
 NUM_CTX = 32768
 MAX_ATTEMPTS = 4        # escalate when failed verifications exceed this
 MAX_ESCALATIONS = 2     # director fixes per step before the user must be consulted
 MAX_TOOL_CALLS = 40     # per attempt
 STEP_CHAR_CAP = 1800
-ALLOW = {"pytest", "python", "python3", "ruff", "make", "cargo", "npm", "go", "ls", "cat", "grep"}  # hygiene, not a sandbox
+GIT_NAME = os.environ.get("AGENT_GIT_NAME", "agent-implementor")    # step commits use this identity,
+GIT_EMAIL = os.environ.get("AGENT_GIT_EMAIL", "agent@localhost")    # never your own or your signing key
+MAX_COMMIT_FILES = 200                                              # refuse suspiciously large commits
+ALLOW = {"pytest", "python", "python3", "ruff", "make", "cargo", "npm", "go", "ls", "cat", "grep"}
 
 EDGES = {  # (from, to) -> actor
     ("NONE", "PLAN"): "director",
@@ -30,7 +33,7 @@ EDGES = {  # (from, to) -> actor
     ("VALIDATE", "BUFFER"): "director",
     ("VALIDATE", "DONE"): "director",
     ("DONE", "PLAN"): "director",
-    ("BUFFER", "PLAN"): "director",          # plan defect; delete this line to forbid
+    ("BUFFER", "PLAN"): "director",
 }
 NEXT = {
     "NONE": "fsm_to('PLAN')",
@@ -42,12 +45,6 @@ NEXT = {
     "DONE": "final summary to user; wait for user",
 }
 RUNNING = False
-
-# ---------- helpers ----------
-def trace(line):
-    AG.mkdir(exist_ok=True)
-    with open(AG / "run.log", "a") as f:
-        f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
 
 
 # ---------- state ----------
@@ -69,6 +66,11 @@ def recover(s):
     """Server died or crashed mid-IMPLEMENT: hand control back to BUFFER."""
     if s["phase"] == "IMPLEMENT" and not RUNNING:
         move(s, "implementor", "BUFFER", needs_directive=False)
+
+def trace(line):
+    AG.mkdir(exist_ok=True)
+    with open(AG / "run.log", "a") as f:
+        f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
 
 
 # ---------- plan ----------
@@ -139,6 +141,32 @@ def log_fail(n, k, out):
         f.write(f"--- attempt {k}\n{stat}\n{out[-1500:]}\n")
 
 
+def git_commit(n, step, mode):
+    """Commit the working tree (minus .agent/) as a plain, unsigned, non-personal identity.
+    Never raises. Returns a short short-hash or a reason string."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": GIT_NAME, "GIT_AUTHOR_EMAIL": GIT_EMAIL,
+           "GIT_COMMITTER_NAME": GIT_NAME, "GIT_COMMITTER_EMAIL": GIT_EMAIL}
+
+    def git(*args):   # env beats config for identity; -c beats config for signing and hooks
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                              cwd=ROOT, capture_output=True, text=True, env=env, timeout=60)
+    try:
+        r = git("add", "-A", "--", ".", ":(exclude).agent")
+        if r.returncode: return f"add failed: {r.stderr.strip()[:120]}"
+        names = git("diff", "--cached", "--name-only").stdout.splitlines()
+        if not names: return "nothing to commit"
+        if len(names) > MAX_COMMIT_FILES:
+            git("reset", "-q")
+            return f"refused: {len(names)} files staged (> {MAX_COMMIT_FILES}); check .gitignore"
+        m = re.search(r"^GOAL:\s*(.+)$", step, re.M)
+        msg = f"{'fix ' if mode == 'direct' else ''}step {n}: {m.group(1).strip() if m else ''}".strip()
+        r = git("commit", "--no-gpg-sign", "-m", msg)
+        if r.returncode: return f"commit failed: {(r.stderr or r.stdout).strip()[:120]}"
+        return git("rev-parse", "--short", "HEAD").stdout.strip()
+    except Exception as e:
+        return f"commit error: {e}"
+
+
 # ---------- implementor runtime ----------
 def system_prompt():
     parts = [(HOME / "common" / "style.md").read_text(),
@@ -149,7 +177,6 @@ def system_prompt():
 
 def make_tools():
     def _safe(p, write=False):
-        """Resolve a path relative to project root, disallowing escapes and .agent writes."""
         r = (ROOT / p).resolve()
         if r != ROOT and ROOT not in r.parents: raise ValueError("path escapes project root")
         if write and (r == AG or AG in r.parents): raise ValueError(".agent is read-only")
@@ -171,6 +198,19 @@ def make_tools():
         r = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=300)
         return f"exit={r.returncode}\n" + (r.stdout + r.stderr)[-3000:]
 
+    def delete_path(path: str) -> str:
+        """Delete a file or directory (recursively) inside the project. Never .git, .agent, or anything outside."""
+        p = pathlib.Path(os.path.normpath(ROOT / path))           # lexical: folds '..' and absolute paths
+        if ROOT not in p.parents: raise ValueError("path escapes project root")
+        t = p.parent.resolve() / p.name                           # resolve the parent only, never the final
+        if ROOT not in t.parents: raise ValueError("path escapes project root")   # component: a symlink is
+        if t.relative_to(ROOT).parts[0] in (".git", ".agent"):                      # removed, not followed
+            raise ValueError(f"{t.relative_to(ROOT).parts[0]} is protected")
+        if not (t.is_symlink() or t.exists()): raise ValueError("no such path")
+        if t.is_symlink() or t.is_file(): t.unlink()
+        else: shutil.rmtree(t)
+        return f"deleted {t.relative_to(ROOT)}"
+
     def finish_step() -> str:
         """Call when every DO item is done. Runs the step's TEST."""
         return ""
@@ -179,10 +219,10 @@ def make_tools():
         """Call only if the step contradicts the code and cannot be done literally."""
         return ""
 
-    return {f.__name__: f for f in (read_file, write_file, run, finish_step, blocked)}
+    return {f.__name__: f for f in (read_file, write_file, run, delete_path, finish_step, blocked)}
 
 def chat(msgs, tools=None):
-    return ollama.chat(model=MODEL, messages=msgs, tools=tools, think=False,
+    return ollama.chat(model=MODEL, messages=msgs, tools=tools, think=False, keep_alive="30m",
                        options={"num_ctx": NUM_CTX, "temperature": 0})
 
 def run_step(s, n, step):
@@ -239,7 +279,11 @@ def write_checkpoint(n, msgs):
     lg = ATTEMPTS / f"{n:02d}.log"
     CHECKPOINT.write_text(f"STEP {n}\n{text}\n\nLOG\n{lg.read_text()[-2500:] if lg.exists() else ''}")
 
+def handoff(msg, commits):
+    return f"{msg} commits={','.join(commits) or '-'}"
+
 def implement(s):
+    commits = []
     while True:
         n = s["pointer"]
         step = (PLAN / f"{n:02d}.md").read_text()
@@ -250,18 +294,22 @@ def implement(s):
             esc = s["escalations"] + 1
             move(s, "implementor", "BUFFER", attempts=0, escalations=esc,
                  needs_directive=True, halted=esc > MAX_ESCALATIONS)
-            return (f"HANDOFF implementor->director phase=BUFFER step={n} "
-                    f"escalation={esc}/{MAX_ESCALATIONS} halted={s['halted']} checkpoint=.agent/checkpoint.md")
+            return handoff(f"HANDOFF implementor->director phase=BUFFER step={n} "
+                           f"escalation={esc}/{MAX_ESCALATIONS} halted={s['halted']} "
+                           f"checkpoint=.agent/checkpoint.md", commits)
         DIRECTIVE.unlink(missing_ok=True)
         (ATTEMPTS / f"{n:02d}.log").unlink(missing_ok=True)
+        c = git_commit(n, step, s["mode"])
+        trace(f"step {n} commit: {c}")
+        commits.append(f"{n}:{c}")
         if s["mode"] == "direct":
             move(s, "implementor", "VALIDATE", attempts=0, escalations=0)
-            return f"HANDOFF implementor->director phase=VALIDATE step={n} (direct) passed"
+            return handoff(f"HANDOFF implementor->director phase=VALIDATE step={n} (direct) passed", commits)
         if n < s["total"]:
             move(s, "implementor", "IMPLEMENT", pointer=n + 1, attempts=0, escalations=0)
         else:
             move(s, "implementor", "VALIDATE", pointer=n + 1, attempts=0, escalations=0)
-            return f"HANDOFF implementor->director phase=VALIDATE steps 1..{n} passed"
+            return handoff(f"HANDOFF implementor->director phase=VALIDATE steps 1..{n} passed", commits)
 
 
 # ---------- MCP tools (director side) ----------
@@ -281,20 +329,17 @@ def fsm_to(phase: str, pointer: int = 0, mode: str = "") -> str:
     """Director transitions: PLAN, DRAFT, BUFFER, DONE. IMPLEMENT is entered via run_implementor.
     BUFFER from VALIDATE requires pointer=<step> and mode='direct'."""
     s = load(); recover(s); frm = s["phase"]
-    # guard against illegal transitions
     if EDGES.get((frm, phase)) != "director" or phase == "IMPLEMENT":
         return f"refused: {frm}->{phase}"
-    # guard against invalid mode values; empty string means "keep current"
     if mode and mode not in ("progressive", "direct"):
         return "refused: mode must be progressive|direct"
-    # guard against accidental plan creation in ~ or outside a git repo
     if phase == "PLAN" and frm == "NONE" and (ROOT == pathlib.Path.home() or not (ROOT / ".git").exists()):
         return "refused: run inside a git repo (not ~)"
     if phase == "PLAN":
         if frm != "NONE": archive_plan()
         PLAN.mkdir(parents=True, exist_ok=True)
         move(s, "director", "PLAN", mode="progressive", pointer=1, total=0, attempts=0,
-            escalations=0, needs_directive=False, halted=False, plan_hash=None)
+             escalations=0, needs_directive=False, halted=False, plan_hash=None)
     elif phase == "DRAFT":
         f = PLAN / "summary.md"
         if not f.exists() or not f.read_text().strip(): return "refused: plan/summary.md missing"

@@ -66,3 +66,14 @@ def test_style_declares_every_message_type_used_in_prompts(srv):
     style = read(srv, "common/style.md")
     for tag in ("QUESTION", "PUSHBACK", "STATUS", "SUMMARY", "REPORT", "CHECKPOINT", "DIRECTIVE"):
         assert tag in style
+
+
+def test_implementor_prompt_mentions_every_tool_it_is_given(srv):
+    text = read(srv, "implementor/implementor.md")
+    missing = [n for n in srv.make_tools() if n not in text]
+    assert not missing, f"implementor.md never mentions: {missing}"
+
+
+def test_style_does_not_forbid_the_tools_the_implementor_has(srv):
+    style = read(srv, "common/style.md")
+    assert "Implementor never" not in style, "style.md still forbids destructive ops; delete_path now exists"
