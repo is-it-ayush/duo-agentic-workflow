@@ -77,3 +77,40 @@ def test_implementor_prompt_mentions_every_tool_it_is_given(srv):
 def test_style_does_not_forbid_the_tools_the_implementor_has(srv):
     style = read(srv, "common/style.md")
     assert "Implementor never" not in style, "style.md still forbids destructive ops; delete_path now exists"
+
+
+def test_drafter_handoff_example_is_accepted_by_the_server(srv):
+    text = read(srv, "director/agents/drafter.md")
+    assert "handoff/draft.md" in text and "DRAFT WRITTEN: <N> steps" in text
+    srv.HANDOFF.mkdir(parents=True)
+    (srv.HANDOFF / "draft.md").write_text("DRAFT WRITTEN: <N> steps".replace("<N>", "2") + "\n")
+    assert srv.check_draft_handoff(2) is None
+
+
+def test_validator_verdict_examples_are_accepted_by_the_server(srv):
+    text = read(srv, "director/agents/validator.md")
+    assert "handoff/validate.md" in text and "handoff/implement.md" in text
+    srv.HANDOFF.mkdir(parents=True)
+    for example in ("PASS run=<k>", "FAIL step=<n> run=<k>"):
+        assert example in text, example
+        (srv.HANDOFF / "validate.md").write_text(example.replace("<k>", "3").replace("<n>", "2") + "\n")
+        verdict, why = srv.validate_verdict({"run_id": 3})
+        assert why is None and verdict in (("PASS", None), ("FAIL", 2))
+
+
+def test_unblocker_reads_the_implementor_handoff(srv):
+    assert "handoff/implement.md" in read(srv, "director/agents/unblocker.md")
+
+
+def test_director_prompt_follows_the_enforced_handoffs(srv):
+    text = read(srv, "director/director.md")
+    assert "validate.md" in text and "draft.md" in text and "/clear" in text
+    assert "AGENT_MODEL" in text and "Never spawn an implementor" in text
+
+
+def test_director_prompt_keeps_every_recovery_path(srv):
+    """A hand-edit of director.md once dropped the unblocker, plan-defect and halt instructions."""
+    text = read(srv, "director/director.md")
+    for needle in ("needs_directive", "spawn `unblocker`", "PLAN DEFECT", "halted=true", "user_guided=true",
+                   "spawn `validator`", "spawn `drafter`", "fsm_to('DONE')", "fsm_to('BUFFER', pointer=<n>, mode='direct')"):
+        assert needle in text, f"director.md lost: {needle}"

@@ -1,5 +1,5 @@
 """Shared helpers. Imported as `helpers` (pytest puts tests/ on sys.path)."""
-import types
+import json, os, select, subprocess, time, types
 
 PHASES = ["NONE", "PLAN", "DRAFT", "BUFFER", "IMPLEMENT", "VALIDATE", "DONE"]
 
@@ -49,12 +49,27 @@ def to_draft(srv):
     assert "phase=DRAFT" in srv.fsm_to("DRAFT")
 
 
-def draft_plan(srv, steps, mode="", pointer=0):
-    """PLAN -> DRAFT -> write step files -> BUFFER. Returns fsm_to('BUFFER') output."""
+def write_draft_handoff(srv, n):
+    """What the drafter leaves for the next stage (required by the server)."""
+    srv.HANDOFF.mkdir(parents=True, exist_ok=True)
+    (srv.HANDOFF / "draft.md").write_text(f"DRAFT WRITTEN: {n} steps\ntests: written by the drafter\n")
+
+
+def write_validate(srv, verdict="PASS", run=None):
+    """What the validator leaves for the director. verdict: 'PASS' or 'FAIL step=<n>'."""
+    srv.HANDOFF.mkdir(parents=True, exist_ok=True)
+    run = srv.load().get("run_id") if run is None else run
+    (srv.HANDOFF / "validate.md").write_text(f"{verdict} run={run}\nfindings: ...\n")
+
+
+def draft_plan(srv, steps, mode="", pointer=0, handoff=True):
+    """PLAN -> DRAFT -> write step files (+ drafter handoff) -> BUFFER. Returns fsm_to('BUFFER') output."""
     to_draft(srv)
     (srv.PLAN / "index.md").write_text("\n".join(f"{i:02d} step" for i in range(1, len(steps) + 1)))
     for i, text in enumerate(steps, 1):
         (srv.PLAN / f"{i:02d}.md").write_text(text)
+    if handoff:
+        write_draft_handoff(srv, len(steps))
     return srv.fsm_to("BUFFER", pointer=pointer, mode=mode)
 
 
@@ -64,3 +79,49 @@ def reach_validate(srv, monkeypatch, cmd="test -f ok.txt"):
     monkeypatch.setattr(srv, "chat", FakeChat(*tool_pass()))
     out = srv.run_implementor()
     assert "phase=VALIDATE" in out, out
+
+
+class Rpc:
+    """Minimal MCP stdio client: newline-delimited JSON-RPC."""
+
+    def __init__(self, argv, env, cwd):
+        self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, cwd=cwd)
+        self.buf = b""
+
+    def send(self, obj):
+        self.p.stdin.write((json.dumps(obj) + "\n").encode())
+        self.p.stdin.flush()
+
+    def recv(self, want_id, timeout=20):
+        end = time.time() + timeout
+        while time.time() < end:
+            while b"\n" in self.buf:
+                line, self.buf = self.buf.split(b"\n", 1)
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if m.get("id") == want_id:
+                    return m
+            if select.select([self.p.stdout], [], [], 0.5)[0]:
+                chunk = os.read(self.p.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                self.buf += chunk
+        err = self.p.stderr.read().decode(errors="replace")[-800:] if self.p.poll() is not None else ""
+        raise TimeoutError(f"no reply to id={want_id}; stderr: {err}")
+
+    def handshake(self):
+        self.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+        assert "serverInfo" in self.recv(1)["result"]
+        self.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def call(self, rid, method, params=None):
+        self.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}})
+        return self.recv(rid)
+
+    def close(self):
+        self.p.kill()
+        self.p.wait()

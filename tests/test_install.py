@@ -123,3 +123,13 @@ def test_symlinks_into_claude_dir(rel, dest):
     link = HOME / dest
     assert link.exists(), f"missing {link}"
     assert link.resolve() == (AGENT / rel).resolve(), f"{link} does not point at {AGENT / rel}"
+
+
+def test_session_start_hook_is_silent_inside_the_headless_implementor_session(tmp_path):
+    """The headless Claude implementor would otherwise be told to 'follow director.md'."""
+    cmd = hook_command()
+    (tmp_path / ".agent").mkdir()
+    (tmp_path / ".agent/state.json").write_text('{"phase":"IMPLEMENT"}')
+    env = {**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path), "AGENT_IMPL_RUN": "1"}
+    r = subprocess.run(cmd, shell=True, env=env, cwd=tmp_path, capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout.strip() == ""

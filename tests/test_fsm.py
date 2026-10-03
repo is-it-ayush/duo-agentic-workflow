@@ -24,6 +24,8 @@ def to_buffer(srv, cmd="true"):
     assert "phase=DRAFT" in srv.fsm_to("DRAFT")
     (srv.PLAN / "index.md").write_text("01 g")
     (srv.PLAN / "01.md").write_text(STEP.format(cmd=cmd))
+    srv.HANDOFF.mkdir(parents=True, exist_ok=True)                      # the drafter's summary is now required
+    (srv.HANDOFF / "draft.md").write_text("DRAFT WRITTEN: 1 steps\n")
     assert "phase=BUFFER" in srv.fsm_to("BUFFER")
 
 def test_illegal_moves(srv):
@@ -57,4 +59,4 @@ def test_escalation(srv, monkeypatch):
     out = srv.run_implementor(); s = srv.load()
     assert "phase=BUFFER" in out and s["needs_directive"] and s["escalations"] == 1
     assert srv.CHECKPOINT.exists()
-    assert srv.run_implementor().startswith("refused")      # directive.md missing
+    assert srv.run_implementor().startswith("refused")

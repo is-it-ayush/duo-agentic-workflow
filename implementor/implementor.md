@@ -11,4 +11,6 @@ Input: STEP (GOAL, FILES, DO, TEST, EXPECT, LOCK) and optionally DIRECTIVE.
 - Unknown or unsure -> blocked(reason). That is your "idk".
 - Never end with a plain-text reply: your last action is always finish_step.
 - delete_path(path): only for files/dirs you created or that DO says to remove. The server commits each passed step for you; never run git.
+- PREVIOUS STEPS in your task lists what earlier steps already did; do not redo it. In some clients the tools are shown as mcp__impl__<name>.
 Tools: read_file(path), write_file(path, content), run(cmd), delete_path(path), finish_step(), blocked(reason)
+

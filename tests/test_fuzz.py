@@ -1,7 +1,7 @@
 """Model-based fuzz: random director/implementor operations must never break FSM invariants."""
 import random
 import pytest
-from helpers import PHASES, FakeChat, call, reply, step_text
+from helpers import PHASES, FakeChat, call, reply, step_text, write_draft_handoff, write_validate
 
 TARGETS = ["PLAN", "DRAFT", "BUFFER", "IMPLEMENT", "VALIDATE", "DONE"]
 
@@ -35,12 +35,23 @@ def test_random_walk_keeps_fsm_invariants(srv, monkeypatch, seed):
     def op_summary():
         (srv.PLAN / "summary.md").write_text("s")
 
-    def op_plan():
+    def op_plan(good=None):
+        good = rnd.random() < 0.8 if good is None else good
+        srv.PLAN.mkdir(parents=True, exist_ok=True)
         for p in srv.step_files():
             p.unlink()
         (srv.PLAN / "index.md").write_text("i")
-        for i in range(1, rnd.choice([1, 2, 3]) + 1):
+        n = rnd.choice([1, 2, 3])
+        for i in range(1, n + 1):
             (srv.PLAN / f"{i:02d}.md").write_text(step_text("test -f ok.txt"))
+        if good:
+            write_draft_handoff(srv, n)
+        elif rnd.random() < 0.5:
+            write_draft_handoff(srv, n + 1)                  # wrong count
+
+    def op_validate():
+        run = srv.load().get("run_id", 0)
+        write_validate(srv, rnd.choice(["PASS", "FAIL step=1", "FAIL step=2"]), run=rnd.choice([run, run, max(run - 1, 0)]))
 
     def op_directive():
         srv.DIRECTIVE.write_text("DO: x")
@@ -55,8 +66,33 @@ def test_random_walk_keeps_fsm_invariants(srv, monkeypatch, seed):
         monkeypatch.setattr(srv, "chat", chat_for(kind))
         return srv.run_implementor(user_guided=rnd.random() < 0.5)
 
-    ops = [op_to, op_to, op_summary, op_plan, op_plan, op_directive, op_tamper,
-           op_run, op_run, op_run, srv.fsm_status]
+    def op_advance():
+        """The next sensible director move for the current phase; 15% of the time it skips a prerequisite."""
+        ph, noisy = srv.load()["phase"], rnd.random() < 0.15
+        if ph in ("NONE", "DONE"):
+            return srv.fsm_to("PLAN")
+        if ph == "PLAN":
+            if not noisy:
+                op_summary()
+            return srv.fsm_to("DRAFT")
+        if ph == "DRAFT":
+            op_plan(good=not noisy)
+            return srv.fsm_to("BUFFER", pointer=rnd.choice([0, 0, 1]), mode=rnd.choice(["", "progressive", "direct"]))
+        if ph == "BUFFER":
+            if srv.load().get("needs_directive") and not noisy:
+                op_directive()
+            return op_run()
+        if ph == "VALIDATE":
+            verdict = rnd.choice(["PASS", "FAIL step=1"])
+            if not noisy:
+                write_validate(srv, verdict)
+            if verdict == "PASS":
+                return srv.fsm_to("DONE")
+            op_directive()
+            return srv.fsm_to("BUFFER", pointer=1, mode="direct")
+
+    ops = [op_advance, op_advance, op_advance, op_advance, op_to, op_to, op_summary, op_plan, op_plan, op_directive, op_tamper,
+           op_run, op_run, op_run, op_validate, op_validate, srv.fsm_status]
 
     for _ in range(60):
         before = srv.load()["phase"]
