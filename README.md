@@ -1,13 +1,8 @@
 # agent: director/implementor agentic workflow
 
-A system-wide, git-tracked workflow where **Claude Code is the director**
-(thinks, plans, reviews) and a **local Ollama model (`qwen3:8b`) is the
-implementor** (executes one small step at a time, exactly as written,
-no design of its own).
+A system-wide, git-tracked workflow where **Claude Code is the director** (thinks, plans, reviews) and a **local Ollama model (`qwen3.5:9b`) is the implementor** (executes one small step at a time, exactly as written, no design of its own).
 
-Goals: minimise director tokens, be precise about what each agent is
-told, and behave as a strict finite state machine. Transitions are enforced
-in code (`server.py`), not by prompts.
+Goals: minimise director tokens, be precise about what each agent is told, and behave as a strict finite state machine. Transitions are enforced in code (`server.py`), not by prompts.
 
 ## Contents
 
@@ -95,7 +90,7 @@ What each agent loads:
 
 ## Install
 
-Prerequisites: Debian-like Linux, Python 3.13, git, Claude Code (CLI), Ollama running with `qwen3:8b` pulled and tool support.
+Prerequisites: Debian-like Linux, Python 3.13, git, Claude Code (CLI), Ollama running with `qwen3.5:9b` pulled and tool support.
 
 ```bash
 cd ~/personal/agent
@@ -142,11 +137,8 @@ exit 0
 Notes:
 
 - Only `Edit(...)` deny rules are matched. A `Write(...)` rule is rejected with a warning.
-- `MCP_TOOL_TIMEOUT` is in milliseconds. It must be long, because `run_implementor()` blocks while
-Qwen works. Check the name and unit against current Claude Code docs.
-- Ollama: the first step pays a cold model load. To keep the model resident, preload with
-`curl -s localhost:11434/api/generate -d '{"model":"qwen3:8b","keep_alive":"30m"}'`. The server
-also passes `keep_alive="30m"`.
+- `MCP_TOOL_TIMEOUT` is in milliseconds. It must be long, because `run_implementor()` blocks while Qwen works. Check the name and unit against current Claude Code docs.
+- Ollama: the first step pays a cold model load. To keep the model resident, preload with `curl -s localhost:11434/api/generate -d '{"model":"qwen3.5:9b","keep_alive":"30m"}'`. The server also passes `keep_alive="30m"`.
 
 Verify the install:
 
@@ -171,68 +163,53 @@ printf '.agent/state.json\n.agent/attempts/\n.agent/checkpoint.md\n.agent/run.lo
 git add -A && git commit -m init          # clean baseline so diffs are readable
 ```
 
-`AGENTS.md` is read by the implementor and by the subagents. Claude Code itself
-reads `CLAUDE.md`, not `AGENTS.md`. Add a `CLAUDE.md` containing `@AGENTS.md`
-only if you want ordinary Claude sessions in that repo to see the same facts.
-Use `python3` in test commands (Debian has no `python`).
+`AGENTS.md` is read by the implementor and by the subagents. Claude Code itself reads `CLAUDE.md`, not `AGENTS.md`. Add a `CLAUDE.md` containing `@AGENTS.md` only if you want ordinary Claude sessions in that repo to see the same facts. Use `python3` in test commands (Debian has no `python`).
 
-`.agent/` is relative to the directory you launch `claude` from. The server uses
-the same rule (`$AGENT_PROJECT` overrides it).
+`.agent/` is relative to the directory you launch `claude` from. The server uses the same rule (`$AGENT_PROJECT` overrides it).
 
 ### Each session
 
 1. Make sure Ollama is running.
-2. Run `claude` in the project directory. `/mcp` should show `agent`, and
-`/agents` the three subagents.
-3. `/agent <goal>`. The director asks one question per message until nothing is
-ambiguous, then writes `.agent/plan/summary.md`.
+2. Run `claude` in the project directory. `/mcp` should show `agent`, and `/agents` the three subagents.
+3. `/agent <goal>`. The director asks one question per message until nothing is ambiguous, then writes `.agent/plan/summary.md`.
 4. Reply `APPROVE` (or list changes).
-5. It then runs by itself: draft the plan, hand off to Qwen, validate. You hear
-back at the end, or if an escalation hits the limit and needs your guidance.
+5. It then runs by itself: draft the plan, hand off to Qwen, validate. You hear back at the end, or if an escalation hits the limit and needs your guidance.
 
 Watch it from another terminal:
 
 ```bash
-tail -f .agent/run.log          # Qwen's tool calls
+tail -f .agent/run.log          # live: Qwen's text, tool calls and (optionally) thinking, then results
 watch -n2 cat .agent/state.json
 git diff --stat
 ```
 
 ### Stop, resume, reset
 
-- **Pause:** exit `claude`. Starting it again in that directory resumes at the
-recorded phase (the hook points Claude at `fsm_status`).
-- **Hard stop mid-implementation:** exit `claude` or `pkill -f personal/agent/server.py`.
-The next `fsm_status` moves a stale `IMPLEMENT` back to `BUFFER`; then re-run.
-After a kill you may need `/mcp` to reconnect.
-- **New goal:** `/agent <goal>` once the phase is `DONE`. The old plan is
-archived under `.agent/archive/`.
+- **Pause:** exit `claude`. Starting it again in that directory resumes at the recorded phase (the hook points Claude at `fsm_status`).
+- **Hard stop mid-implementation:** exit `claude` or `pkill -f personal/agent/server.py`. The next `fsm_status` moves a stale `IMPLEMENT` back to `BUFFER`; then re-run. After a kill you may need `/mcp` to reconnect.
+- **New goal:** `/agent <goal>` once the phase is `DONE`. The old plan is archived under `.agent/archive/`.
 - **Abandon:** `rm -rf .agent` and `git reset --hard` to your baseline commit.
+
+## Step commits
+
+After a step's tests pass, the server (not Qwen) runs `git add -A` (excluding `.agent/`) and commits `step N: <GOAL>` (`fix step N: ...` in direct mode). The commit is deliberately detached from your git identity:
+
+- author and committer come from `GIT_NAME`/`GIT_EMAIL`, set through environment variables, so your config and any exported `GIT_AUTHOR_*` variables are ignored;
+- signing is switched off (`--no-gpg-sign`, `commit.gpgsign=false`), so a repo or global config that requires signed commits cannot block it;
+- git hooks are disabled for these commits (`core.hooksPath=/dev/null`), including your own pre-commit and commit-msg hooks.
+
+A step with no changes makes no commit. A failed commit is reported in the `HANDOFF ... commits=` list and never blocks the workflow. It commits whatever is in the working tree, so start each run from a clean tree with a `.gitignore` in place. Squash or re-sign the agent's commits yourself before pushing.
 
 ## Phases
 
-1. **PLAN** (director + you). Rules in `common/discussion.md`: one question per
-message, options with a recommendation, assumptions stated, nothing coded.
-Output: `summary.md` (goal, decisions with short reasons, ordered milestones,
-how each is tested, out of scope, no open items). Only an explicit `APPROVE`
-moves on. The server cannot verify your consent; that rule lives in the prompts.
-2. **DRAFT** (`drafter` subagent, fresh context). Turns the summary into
-small, ordered step files. The drafter also writes the test files into the
-project and lists them in `LOCK`, so Qwen cannot weaken them.
-3. **BUFFER.** Pure handoff: the director calls `run_implementor()`. The
-plan is hash-locked and cannot change here. After an escalation, the `unblocker`
-subagent writes `.agent/directive.md`, which is injected into Qwen's next
-attempt at that step.
-4. **IMPLEMENT** (Qwen). Per step, in a fresh context: read, edit, `finish_step`.
-The server runs the step's TEST commands. Pass means advance. A failed attempt
-feeds the output back to Qwen. More than 4 failed attempts (or `blocked()`)
-writes a checkpoint and returns to BUFFER.
+1. **PLAN** (director + you). Rules in `common/discussion.md`: one question per message, options with a recommendation, assumptions stated, nothing coded. Output: `summary.md` (goal, decisions with short reasons, ordered milestones, how each is tested, out of scope, no open items). Only an explicit `APPROVE` moves on. The server cannot verify your consent; that rule lives in the prompts.
+2. **DRAFT** (`drafter` subagent, fresh context). Turns the summary into small, ordered step files. The drafter also writes the test files into the project and lists them in `LOCK`, so Qwen cannot weaken them.
+3. **BUFFER.** Pure handoff: the director calls `run_implementor()`. The plan is hash-locked and cannot change here. After an escalation, the `unblocker` subagent writes `.agent/directive.md`, which is injected into Qwen's next attempt at that step.
+4. **IMPLEMENT** (Qwen). Per step, in a fresh context: read, edit, `finish_step`. The server runs the step's TEST commands. Pass means advance. A failed attempt feeds the output back to Qwen. More than 4 failed attempts (or `blocked()`) writes a checkpoint and returns to BUFFER.
    - A text-only reply from Qwen counts as an implicit `finish_step`.
+   - After each passed step the **server** commits the working tree (see [Step commits](#step-commits)). Qwen never runs git.
    - Progressive mode runs all remaining steps. Direct mode runs only `pointer`, then goes to VALIDATE.
-5. **VALIDATE** (`validator` subagent, fresh context). Runs every TEST plus the
-project's full test command and checks the code against the plan. `PASS` goes
-to DONE with a final summary. `FAIL step=n` writes a directive for that step
-and returns to BUFFER in direct mode.
+5. **VALIDATE** (`validator` subagent, fresh context). Runs every TEST plus the project's full test command and checks the code against the plan. `PASS` goes to DONE with a final summary. `FAIL step=n` writes a directive for that step and returns to BUFFER in direct mode.
 
 After 2 director fixes on the same step the server halts. The director must consult you, then call `run_implementor(user_guided=true)`.
 
@@ -268,7 +245,7 @@ In each project, under `.agent/`:
 | `directive.md` | unblocker / validator | fix instructions for the implementor, deleted after the step passes |
 | `checkpoint.md` | server (Qwen summary + log) | why a step escalated |
 | `attempts/NN.log` | server | one entry per failed attempt |
-| `run.log` | server | trace of Qwen's tool calls |
+| `run.log` | server | live log: per model call a header (`── time step N ──`), then `[think]`, `[say]` and `[call]` lines as tokens arrive, plus tool results, commits and verification traces. Grows without bound; delete it freely |
 | `archive/<timestamp>/` | server | previous plans |
 
 ## What is enforced vs advisory
@@ -283,6 +260,8 @@ In each project, under `.agent/`:
 - Tests are run by the server, not trusted from Qwen.
 - Locked files must be unmodified.
 - Qwen's tools are sandboxed: paths cannot escape the project, `.agent/` is read-only, and `run` is allowlisted.
+- `delete_path` removes files and directories only inside the project, never `.git` or `.agent`, and never follows a symlink out of the project (the link is removed, not its target).
+- Step commits are made by the server with a fixed identity, signing off and hooks off.
 
 **Advisory (prompts only):**
 
@@ -298,7 +277,7 @@ Constants at the top of `server.py`:
 
 | Name | Default | Meaning |
 |---|---|---|
-| `MODEL` | `qwen3:8b` | override with `AGENT_MODEL` |
+| `MODEL` | `qwen3.5:9b` | override with `AGENT_MODEL` |
 | `NUM_CTX` | 32768 | check `ollama ps` shows 100% GPU; lower it if it spills to CPU |
 | `MAX_ATTEMPTS` | 4 | escalate when failed verifications exceed this (the 5th failure) |
 | `MAX_ESCALATIONS` | 2 | director fixes per step before the user must be consulted |
@@ -306,10 +285,13 @@ Constants at the top of `server.py`:
 | `STEP_CHAR_CAP` | 1800 | max step file size |
 | `ALLOW` | pytest, python, python3, ruff, make, cargo, npm, go, ls, cat, grep | commands Qwen's `run` may execute |
 
-Environment: `AGENT_PROJECT` (project root, default cwd), `AGENT_MODEL`.
+| `GIT_NAME` / `GIT_EMAIL` | `agent-implementor` / `agent@localhost` | identity for step commits; override with `AGENT_GIT_NAME` / `AGENT_GIT_EMAIL` |
+| `MAX_COMMIT_FILES` | 200 | a step commit staging more files than this is refused and unstaged (usually a missing `.gitignore`) |
+
+Environment: `AGENT_PROJECT` (project root, default cwd), `AGENT_MODEL`, `AGENT_GIT_NAME`, `AGENT_GIT_EMAIL`, `AGENT_THINK` (`1` to let Qwen think; default off), `AGENT_STREAM` (`0` to disable token streaming into `run.log`; default on).
 
 MCP tools (director): `fsm_status()`, `fsm_to(phase, pointer, mode)`, `run_implementor(user_guided)`.
-Qwen's tools: `read_file`, `write_file`, `run`, `finish_step`, `blocked`.
+Qwen's tools: `read_file`, `write_file`, `run`, `delete_path`, `finish_step`, `blocked`.
 
 ## Tests
 
@@ -326,6 +308,8 @@ LIVE=1 ./venv/bin/pytest -q tests/test_live_qwen.py -s    # real Ollama; non-det
 | `test_fuzz.py` | random director/implementor operations; phase changes must only occur through `move()`, in order |
 | `test_prompts.py` | prompts vs server: legal transitions in `director.md`, subagent names and frontmatter, drafter template accepted by the server |
 | `test_install.py` | real `~/.claude.json` and `settings.json`, hook behaviour, symlinks, an actual MCP boot |
+| `test_tools_git.py` | `delete_path` sandbox (symlinks, `..`, protected dirs); step commits under a hostile signing config, ambient identity env vars, failing hooks, oversized and failing commits |
+| `test_observability.py` | `run.log` streaming (thinking, text, calls), the think/stream switches, thinking kept out of the history, labelled checkpoint calls |
 | `test_live_qwen.py` | real Qwen; single step, two dependent steps, impossible step must escalate |
 
 Run the suite before each live run. Use `--basetemp=/tmp/live` to get a predictable `.agent/` path to tail.
@@ -344,6 +328,8 @@ Run the suite before each live run. Use `--basetemp=/tmp/live` to get a predicta
 | Qwen's `run` says `denied` | the command isn't in `ALLOW`; use `python3`, not `python`, on Debian |
 | Very slow first step | cold model load; preload with the `keep_alive` call above, check `ollama ps` |
 | Ollama reachable from the LAN | `OLLAMA_HOST=0.0.0.0` binds all interfaces; use `127.0.0.1` unless intended |
+| `commits=1:add failed` / `commit failed` in a HANDOFF line | commits never block the workflow, but something is wrong with git: a stale `.git/index.lock`, a full disk, a bad repo. Fix it; later steps' commits will include the missed changes |
+| `commits=1:refused: N files staged` | the working tree has many untracked files (venv, node_modules). Add a `.gitignore` |
 | State stuck in `IMPLEMENT` after a kill | call `fsm_status`; it recovers to `BUFFER` |
 
 ## Changing the prompts or server
@@ -358,14 +344,8 @@ The prompts steer the agent that would be editing them, so treat changes as code
 
 ## Known limitations
 
-- `qwen3:8b` quality bounds what a step can ask for. Keep steps small and single-goal.
+- `qwen3.5:9b` quality bounds what a step can ask for. Keep steps small and single-goal.
 - Qwen's own checkpoint summary can be wrong. Treat the mechanical log in `checkpoint.md` as the evidence.
 - The server cannot verify that you approved a plan.
 - A blocking MCP call can't be interrupted cleanly from Claude. Hard stop is by killing the process.
 - Test commands run without a shell, so no pipes, redirects or `&&`.
-
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](./LICENSE.md) file
-for details.

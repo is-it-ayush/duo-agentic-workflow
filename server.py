@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Director/implementor FSM + implementor runtime. Project = $AGENT_PROJECT or cwd."""
-import hashlib, json, os, pathlib, re, shlex, shutil, subprocess, time
+import hashlib, json, os, pathlib, re, shlex, shutil, subprocess, time, types
 from typing import Any
 import ollama
 from mcp.server.fastmcp import FastMCP
@@ -19,6 +19,9 @@ MAX_TOOL_CALLS = 40     # per attempt
 STEP_CHAR_CAP = 1800
 GIT_NAME = os.environ.get("AGENT_GIT_NAME", "agent-implementor")    # step commits use this identity,
 GIT_EMAIL = os.environ.get("AGENT_GIT_EMAIL", "agent@localhost")    # never your own or your signing key
+THINK = os.environ.get("AGENT_THINK", "0").lower() in ("1", "true", "yes")    # let the model think (slow); logged to run.log
+STREAM = os.environ.get("AGENT_STREAM", "1").lower() in ("1", "true", "yes")  # stream tokens into run.log as they arrive
+CTX = {"label": ""}                                                           # shown in run.log call headers
 MAX_COMMIT_FILES = 200                                              # refuse suspiciously large commits
 ALLOW = {"pytest", "python", "python3", "ruff", "make", "cargo", "npm", "go", "ls", "cat", "grep"}
 
@@ -222,12 +225,37 @@ def make_tools():
     return {f.__name__: f for f in (read_file, write_file, run, delete_path, finish_step, blocked)}
 
 def chat(msgs, tools=None):
-    return ollama.chat(model=MODEL, messages=msgs, tools=tools, think=False, keep_alive="30m",
-                       options={"num_ctx": NUM_CTX, "temperature": 0})
+    """One model call. Streams thinking / text / tool calls into .agent/run.log live (tail -f it).
+    Returns an object with .message; thinking is logged but NOT kept in the history we send back."""
+    AG.mkdir(exist_ok=True)
+    kw = dict(model=MODEL, messages=msgs, tools=tools, think=THINK, keep_alive="30m",
+              options={"num_ctx": NUM_CTX, "temperature": 0})
+    content, calls, mode = [], [], None
+    with open(AG / "run.log", "a") as f:
+        f.write(f"\n── {time.strftime('%H:%M:%S')} {CTX['label']} ──")
+
+        def part(kind, text):
+            nonlocal mode
+            if kind != mode:
+                f.write(f"\n[{kind}] "); mode = kind
+            f.write(text); f.flush()
+
+        for ch in (ollama.chat(stream=True, **kw) if STREAM else [ollama.chat(**kw)]):
+            m = ch.message
+            if m.thinking: part("think", m.thinking)
+            if m.content:
+                part("say", m.content); content.append(m.content)
+            for tc in m.tool_calls or []:
+                part("call", f"{tc.function.name}({json.dumps(dict(tc.function.arguments), default=str)[:300]})")
+                calls.append(tc); mode = None
+        f.write("\n")
+    return types.SimpleNamespace(message=ollama.Message(role="assistant", content="".join(content),
+                                                        tool_calls=calls or None))
 
 def run_step(s, n, step):
     """Fresh context per call. Returns ('pass'|'escalate', msgs)."""
     tools = make_tools()
+    CTX["label"] = f"step {n}"
     locks0 = snap(parse_step(step)["lock"])
     task = f"STEP {n}/{s['total']}\n{step}"
     if DIRECTIVE.exists():
@@ -275,6 +303,7 @@ def write_checkpoint(n, msgs):
     msgs = msgs + [{"role": "user", "content":
         "Stop. Write the checkpoint, nothing else:\nPROBLEM: <exact>\n"
         "ATTEMPTS: one line each '<k>: changed <what> -> <result>'\nSTUCK ON: <one line>"}]
+    CTX["label"] = f"step {n} checkpoint"
     text = (chat(msgs).message.content or "")[:2000]
     lg = ATTEMPTS / f"{n:02d}.log"
     CHECKPOINT.write_text(f"STEP {n}\n{text}\n\nLOG\n{lg.read_text()[-2500:] if lg.exists() else ''}")
